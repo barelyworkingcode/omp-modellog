@@ -133,15 +133,67 @@ describe("collect", () => {
 		expect(result.rows[0]).toMatchObject({ role: "task", modelShort: "vCode", origin: "subagent", calls: 3, input: 900, output: 300, cost: 0.04 });
 	});
 
-	test("an async task with only progress[] (no results yet) still contributes an approximate row", () => {
+	test("a still-running progress entry creates a visible row but settles nothing yet", () => {
+		// Numbers are deliberately withheld until the job settles (completed/failed/aborted) —
+		// a "running" snapshot's flat tokens/cost would just have to be undone once the real,
+		// final numbers arrive, so it's cheaper to never count it in the first place.
 		const details = {
 			progress: [{ id: "b1", agent: "scout", status: "running", modelRole: "smol", resolvedModelIdentity: "relay/vCode", tokens: 1200, cost: 0.01, durationMs: 4000 }],
 		};
 		const result = collect([taskResult(details)], undefined);
 		expect(result.rows).toHaveLength(1);
-		expect(result.rows[0]?.role).toBe("smol");
-		expect(result.rows[0]?.approxTokens).toBe(1200);
-		expect(result.rows[0]?.cost).toBeCloseTo(0.01);
+		expect(result.rows[0]).toMatchObject({ role: "smol", modelShort: "vCode", calls: 0, approxTokens: 0, cost: 0, durationMs: 0 });
+	});
+
+	test("a progress entry that completes directly (no hub round-trip) settles using its flat tokens/cost", () => {
+		const details = {
+			progress: [{ id: "b2", agent: "scout", status: "completed", modelRole: "smol", resolvedModelIdentity: "relay/vCode", tokens: 1200, cost: 0.01, durationMs: 4000 }],
+		};
+		const result = collect([taskResult(details)], undefined);
+		expect(result.rows).toHaveLength(1);
+		expect(result.rows[0]).toMatchObject({ calls: 1, approxTokens: 1200, cost: 0.01, durationMs: 4000 });
+	});
+
+	test("a subagent's own session file, when readable, overrides both SingleResult.usage and flat fallback numbers", () => {
+		const details = {
+			results: [
+				{
+					id: "real1",
+					agent: "sonic",
+					modelRole: "task",
+					resolvedModelIdentity: "relay/vCode",
+					requests: 1,
+					durationMs: 5000,
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } }, // should be ignored in favor of the reader
+				},
+			],
+		};
+		const reader = (jobId: string) => (jobId === "real1" ? { input: 900, output: 300, cacheRead: 200, cacheWrite: 0, cost: 0.04, calls: 4 } : undefined);
+		const result = collect([taskResult(details)], undefined, reader);
+		expect(result.rows).toHaveLength(1);
+		expect(result.rows[0]).toMatchObject({ calls: 4, input: 900, output: 300, cacheRead: 200, cost: 0.04, durationMs: 5000 });
+	});
+
+	test("a subagent settled purely via hub (no task-side usage at all) picks up real numbers from its own session file", () => {
+		// Reproduces the exact real-world gap this was built to close: a hub
+		// completion carries duration/model/status but never usage, so without
+		// the reader this row would show real duration but zero tokens/cost.
+		const pending = taskResult({ progress: [{ id: "PlanX", agent: "pm-plan", modelRole: "plan", status: "pending" }] });
+		const hubDone = hubResult({ jobs: [{ id: "PlanX", status: "completed", durationMs: 93_764, resolvedModelIdentity: "openai-codex/gpt-6-astra" }] });
+		const reader = (jobId: string) => (jobId === "PlanX" ? { input: 8278, output: 136, cacheRead: 0, cacheWrite: 0, cost: 0.08958, calls: 1 } : undefined);
+
+		const result = collect([pending, hubDone], undefined, reader);
+		expect(result.rows).toHaveLength(1);
+		expect(result.rows[0]).toMatchObject({ role: "plan", modelShort: "gpt-6-astra", calls: 1, input: 8278, output: 136, cost: 0.08958, durationMs: 93_764 });
+	});
+
+	test("a reader that throws is swallowed and falls back to whatever numbers the job itself reported", () => {
+		const details = { progress: [{ id: "b3", agent: "scout", status: "completed", modelRole: "smol", resolvedModelIdentity: "relay/vCode", tokens: 50, cost: 0.002, durationMs: 100 }] };
+		const reader = (): never => {
+			throw new Error("disk error");
+		};
+		const result = collect([taskResult(details)], undefined, reader);
+		expect(result.rows[0]).toMatchObject({ approxTokens: 50, cost: 0.002 });
 	});
 
 	test("progress entries already represented in results are not double-counted", () => {

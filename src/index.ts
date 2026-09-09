@@ -1,8 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { collect } from "./collect";
+import { collect, type SubagentUsageReader } from "./collect";
 import { formatHeadline, formatJson, formatStatusLine, formatTable } from "./format";
 import { appendSessionReport, defaultLogDir } from "./log";
 import type { ModelResolver } from "./roles";
+import { readSubagentUsage } from "./subagent-usage";
 import type { CollectResult, SessionEntryLike } from "./types";
 
 const WIDGET_KEY = "modellog";
@@ -34,9 +35,20 @@ function buildResolver(ctx: ExtensionContext): ModelResolver | undefined {
 	};
 }
 
+function buildSubagentUsageReader(ctx: ExtensionContext): SubagentUsageReader | undefined {
+	let sessionFile: string | undefined;
+	try {
+		sessionFile = ctx.sessionManager.getSessionFile();
+	} catch {
+		return undefined;
+	}
+	if (!sessionFile) return undefined;
+	return (jobId: string) => readSubagentUsage(sessionFile, jobId);
+}
+
 function runCollect(ctx: ExtensionContext): CollectResult {
 	const entries = ctx.sessionManager.getEntries() as unknown as SessionEntryLike[];
-	return collect(entries, buildResolver(ctx));
+	return collect(entries, buildResolver(ctx), buildSubagentUsageReader(ctx));
 }
 
 function getAgentDir(pi: ExtensionAPI): string | undefined {

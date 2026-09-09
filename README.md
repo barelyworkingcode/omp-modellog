@@ -8,16 +8,21 @@ use, in what order, and what did each cost?**
 
 ```
 /modellog
-Models used: plan -> claude-opus-5, task -> vCode, default -> gpt-5.6-luna
+Models used: tiny -> vCode, default -> gpt-5.6-luna, plan -> gpt-6-astra, task -> vCode
 
-role     model           calls  in     out   cache r  cache w  cost     time    origin
--------  --------------  -----  -----  ----  -------  -------  -------  ------  --------
-plan     claude-opus-5   4      16.6k  440   15.9k    0        $0.0038  10.8s
-task     vCode           2      3.2k   1.4k  16.9k    0        $0.0028  27.2s   subagent: sonic (completed)
-default  gpt-5.6-luna    11     28.1k  3.1k  74.8k    0        $0.0112  66.2s
--------  --------------  -----  -----  ----  -------  -------  -------  ------  --------
-total                    17     47.9k  4.9k  107.6k   0        $0.0178  104.2s
+role     model         calls  in   out   cache r  cache w  cost   time    origin
+-------  ------------  -----  ---  ----  -------  -------  -----  ------  -------------------------------
+tiny     vCode         2      19   4     844      0        $0     -       aux: auto-thinking
+default  gpt-5.6-luna  37     66k  5.8k  1.3m     0        $0.05  2m44s
+plan     gpt-6-astra   19     80k  6.9k  253k     0        $1.39  4m32s   subagent: pm-plan (completed)
+task     vCode         16     42k  71k   340k     0        $0     16m19s  subagent: pm-worker (completed)
+-------  ------------  -----  ---  ----  -------  -------  -----  ------  -------------------------------
+total                  74     187k  84k   1.9m     0        $1.44  23m36s
 ```
+
+*(A real multi-agent session output. The `plan` row is real spend on an
+expensive model — not a rounding artifact — recovered from the subagent's
+own session file; see [below](#the-async-task--hub-handshake-the-one-non-obvious-part).)*
 
 ![omp-modellog running in a live session, showing role, model, tokens, cost, time, and a still-running subagent](docs/screenshot.png)
 
@@ -108,12 +113,25 @@ reconciles the `hub` completion into the row the `task` placeholder created,
 including a de-dupe guard so re-polling an already-settled job doesn't
 double-count its duration.
 
-**Known limitation:** the `hub` completion snapshot carries duration and
-resolved model, but no token/cost usage. A subagent's tokens/cost are only
-available when its `task` result eventually reports a populated `results[]`
-entry with `usage` — if a subagent is reaped purely through `hub` without
-ever getting a completed `task`-side result, its row shows real duration but
-`-` for cost.
+A completed `hub` job, however, carries duration/model/status and **nothing
+else** — no tokens, no cost, ever, for any subagent observed so far. Relying
+on that alone made every multi-agent (`pm-plan`/`pm-worker`-style) session
+show real duration but an unhelpful `-` for a subagent role's cost — which
+is exactly wrong when that role is the expensive one (a `plan`-role subagent
+on a frontier model can outspend the main session).
+
+The fix: a subagent always runs as its own nested omp session, written to
+`<parent session directory>/<jobId>.jsonl`, with full per-turn usage/cost
+just like any other session — the parent-side tool results just never
+surface it. This extension reads that file directly and sums its real
+usage once a job settles, overriding both the `hub` completion (which has
+none) and a `task` result's own `usage` (when present, it's usually a
+subset — the child file is the ground truth). It falls back to whatever
+flat numbers the job itself reported only if that file can't be found or
+read (e.g. a subagent stored somewhere non-standard). Job ids are validated
+as plain filename segments before being used in a path — they ultimately
+trace back to a task name an LLM chose, so they're treated as untrusted
+input, not a path an extension can construct freely.
 
 ## Why not `~/.omp/stats.db`
 
