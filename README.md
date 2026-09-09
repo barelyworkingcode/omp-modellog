@@ -20,16 +20,12 @@ task     vCode         16     42k  71k   340k     0        $0     16m19s  subage
 total                  74     187k  84k   1.9m     0        $1.44  23m36s
 ```
 
-*(A real multi-agent session output. The `plan` row is real spend on an
-expensive model — not a rounding artifact — recovered from the subagent's
-own session file; see [below](#the-async-task--hub-handshake-the-one-non-obvious-part).)*
+![omp-modellog's actual terminal output for the session above — role, model, tokens, cost, and time per subagent](docs/screenshot.png)
 
-![omp-modellog running in a live session, showing role, model, tokens, cost, time, and a still-running subagent](docs/screenshot.png)
-
-*(In that screenshot, `task -> unknown` is caught mid-flight: the `pm-worker`
-subagent hadn't resolved its model via the async `hub` handshake yet at the
-moment `/modellog` ran — see [below](#the-async-task--hub-handshake-the-one-non-obvious-part).
-It resolves once the subagent settles.)*
+*(A real multi-agent session, captured live. The `plan` row's $1.39 is real
+spend on an expensive model, not a rounding artifact — recovered from the
+subagent's own session file, since neither the `task` nor `hub` tool result
+reports it; see [below](#the-async-task--hub-handshake-the-one-non-obvious-part).)*
 
 It also writes the same summary to a log file when the session ends, so you
 don't have to remember to ask.
