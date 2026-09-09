@@ -1,0 +1,17 @@
+{
+	"name": "omp-modellog",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "omp extension that reports which model roles were used during a session, in call order, with tokens/cost/time when available.",
+	"omp": {
+		"extensions": ["./src/index.ts"]
+	},
+	"devDependencies": {
+		"@oh-my-pi/pi-coding-agent": "18.1.15",
+		"@types/bun": "^1.1.0"
+	},
+	"scripts": {
+		"test": "bun test"
+	}
+}
