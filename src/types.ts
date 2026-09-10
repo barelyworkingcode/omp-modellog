@@ -69,6 +69,29 @@ export interface OtherEntryLike {
 }
 
 /**
+ * A subagent's result "auto-delivers" this way whenever the orchestrator
+ * doesn't happen to consume it via an explicit `hub jobs`/`wait` snapshot
+ * first — this build's default completion path for a background job, per
+ * its own tool text ("result auto-delivers on yield unless a settled `hub
+ * jobs`/`wait` snapshot consumes it first"). Confirmed empirically: a fully
+ * completed subagent that is never polled via `hub` after it finishes shows
+ * up ONLY as one of these, never as a `hub`-reported "completed" status —
+ * so a reader that only watches `task`/`hub` toolResult entries (see
+ * collect.ts) silently drops its cost/tokens entirely.
+ */
+export interface CustomMessageEntryLike {
+	type: "custom_message";
+	timestamp: string;
+	customType?: string;
+	content?: unknown;
+	details?: unknown;
+}
+
+export function isCustomMessageEntry(e: SessionEntryLike): e is CustomMessageEntryLike {
+	return e.type === "custom_message";
+}
+
+/**
  * Deliberately NOT a single discriminated union with a catch-all `{type:
  * string}` member — a catch-all whose discriminant is the bare `string` type
  * is never excluded by an `entry.type === "literal"` check (every literal is
@@ -76,7 +99,31 @@ export interface OtherEntryLike {
  * property access back into `unknown`. Keep the specific shapes separate and
  * narrow with plain `if (entry.type === "...")` type assertions instead.
  */
-export type SessionEntryLike = ModelChangeEntryLike | ModelUsageEntryLike | MessageEntryLike | OtherEntryLike;
+export type SessionEntryLike = ModelChangeEntryLike | ModelUsageEntryLike | MessageEntryLike | CustomMessageEntryLike | OtherEntryLike;
+
+/**
+ * The `details` payload of an `async-result` custom_message. Unlike
+ * `HubJobLike`/`AgentProgressLike`, this shape carries no role, resolved
+ * model, or usage of its own — only enough to identify the job and its
+ * elapsed time. Settling it therefore depends entirely on a row an earlier
+ * `task`/`hub` sighting already created (for role/model) and on the
+ * subagent's own session file (for usage) — see collect.ts.
+ */
+export interface AsyncResultJobLike {
+	jobId?: string;
+	id?: string;
+	durationMs?: number;
+}
+
+export interface AsyncResultDetailsLike {
+	jobs?: AsyncResultJobLike[];
+}
+
+export function isAsyncResultDetails(x: unknown): x is AsyncResultDetailsLike {
+	if (!x || typeof x !== "object") return false;
+	const jobs = (x as Record<string, unknown>).jobs;
+	return jobs === undefined || Array.isArray(jobs);
+}
 
 export function isModelChangeEntry(e: SessionEntryLike): e is ModelChangeEntryLike {
 	return e.type === "model_change";

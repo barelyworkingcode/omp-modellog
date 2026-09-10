@@ -271,6 +271,76 @@ describe("collect", () => {
 		expect(result.rows).toHaveLength(1); // the assistant call after the poisoned entry still lands
 	});
 
+	test("a cancelled task-progress job settles using real usage, instead of sitting at zero forever", () => {
+		// Reproduces a real session: two pm-worker launches ran ~36 real minutes
+		// on the local model before being killed for stalling. Before this fix,
+		// "cancelled" wasn't in the terminal-status check, so the row never left
+		// its all-zero placeholder despite real tokens having been spent.
+		const details = { progress: [{ id: "W1Product", agent: "pm-worker", status: "cancelled", modelRole: "task", resolvedModelIdentity: "relay/vCode", durationMs: 2_195_777 }] };
+		const reader = (jobId: string) => (jobId === "W1Product" ? { input: 61995, output: 131518, cacheRead: 113933, cacheWrite: 0, cost: 0, calls: 8 } : undefined);
+		const result = collect([taskResult(details)], undefined, reader);
+		expect(result.rows).toHaveLength(1);
+		expect(result.rows[0]).toMatchObject({ role: "task", modelShort: "vCode", calls: 8, input: 61995, output: 131518, durationMs: 2_195_777, errors: 1 });
+		expect(result.rows[0]?.origin).toBe("subagent");
+	});
+
+	test("a cancelled hub job (e.g. an explicit `hub cancel`) also settles instead of staying zero", () => {
+		const pending = taskResult({ progress: [{ id: "W2Harness", agent: "pm-worker", modelRole: "task", status: "pending" }] });
+		const cancelled = hubResult({ jobs: [{ id: "W2Harness", status: "cancelled", durationMs: 2_195_777, resolvedModelIdentity: "relay/vCode" }] });
+		const reader = (jobId: string) => (jobId === "W2Harness" ? { input: 68327, output: 33736, cacheRead: 86341, cacheWrite: 0, cost: 0, calls: 7 } : undefined);
+		const result = collect([pending, cancelled], undefined, reader);
+		expect(result.rows).toHaveLength(1);
+		expect(result.rows[0]).toMatchObject({ calls: 7, input: 68327, output: 33736, durationMs: 2_195_777, errors: 1 });
+	});
+
+	test("a subagent result that auto-delivers as a custom_message (no hub round-trip at all) still settles", () => {
+		// Reproduces a real session: a `pm-plan` job whose result auto-delivered
+		// (the tool's default completion path) and was never captured by an
+		// explicit `hub jobs`/`wait` snapshot. Before this fix, collect() only
+		// read `type: "message"` entries, so this shape — `type:
+		// "custom_message"` — was invisible and the run's cost/tokens vanished.
+		const pending = taskResult({ progress: [{ id: "PaperTetrisPlan", agent: "pm-plan", modelRole: "plan", status: "pending" }] });
+		const runningPoll = hubResult({ jobs: [{ id: "PaperTetrisPlan", status: "running", durationMs: 123_889, resolvedModelIdentity: "claude-bridge/claude-opus-5" }] });
+		const asyncDelivery: SessionEntryLike = {
+			type: "custom_message",
+			timestamp: "2026-01-01T00:10:00.000Z",
+			customType: "async-result",
+			content: '<system-notice>\nBackground job PaperTetrisPlan has completed. Resume your work using the result below.\n<task-result id="PaperTetrisPlan" agent="pm-plan" status="completed" duration="8m35s">\n...',
+			details: { jobs: [{ jobId: "PaperTetrisPlan", type: "task", label: "PaperTetrisPlan", durationMs: 515_774 }] },
+		};
+		const reader = (jobId: string) => (jobId === "PaperTetrisPlan" ? { input: 28, output: 37549, cacheRead: 496375, cacheWrite: 68614, cost: 1.61589, calls: 14 } : undefined);
+
+		const result = collect([pending, runningPoll, asyncDelivery], undefined, reader);
+
+		expect(result.rows).toHaveLength(1);
+		expect(result.rows[0]).toMatchObject({ role: "plan", modelShort: "claude-opus-5", origin: "subagent", calls: 14, output: 37549, durationMs: 515_774, errors: 0 });
+	});
+
+	test("a failed async-result is scraped from the content tag and counted as an error", () => {
+		const pending = taskResult({ progress: [{ id: "j9", agent: "scout", modelRole: "task", status: "pending", resolvedModelIdentity: "relay/vCode" }] });
+		const asyncDelivery: SessionEntryLike = {
+			type: "custom_message",
+			timestamp: "2026-01-01T00:10:00.000Z",
+			customType: "async-result",
+			content: '<task-result id="j9" agent="scout" status="failed" duration="1m00s">boom</task-result>',
+			details: { jobs: [{ jobId: "j9", durationMs: 60_000 }] },
+		};
+		const result = collect([pending, asyncDelivery], undefined);
+		expect(result.rows[0]).toMatchObject({ calls: 1, errors: 1, durationMs: 60_000 });
+	});
+
+	test("a custom_message that isn't an async-result, or has malformed details, is ignored without throwing", () => {
+		const result = collect(
+			[
+				{ type: "custom_message", timestamp: "t", customType: "something-else", details: { jobs: [{ jobId: "x" }] } } as SessionEntryLike,
+				{ type: "custom_message", timestamp: "t", customType: "async-result", details: "not-an-object" } as SessionEntryLike,
+			],
+			undefined,
+		);
+		expect(result.rows).toHaveLength(0);
+		expect(result.warnings).toHaveLength(0);
+	});
+
 	test("empty input produces an empty, well-formed result", () => {
 		const result = collect([], undefined);
 		expect(result.rows).toEqual([]);

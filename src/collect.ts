@@ -1,6 +1,8 @@
 import { labelForModelChange, type ModelResolver } from "./roles";
 import {
 	isAssistantMessage,
+	isAsyncResultDetails,
+	isCustomMessageEntry,
 	isHubToolDetails,
 	isMessageEntry,
 	isModelChangeEntry,
@@ -8,6 +10,7 @@ import {
 	isTaskToolDetails,
 	isToolResultMessage,
 	type AgentProgressLike,
+	type AsyncResultJobLike,
 	type CollectResult,
 	type HubJobLike,
 	type RoleUsage,
@@ -106,6 +109,13 @@ export function collect(entries: SessionEntryLike[], resolver: ModelResolver | u
 				row.calls += 1;
 				addUsage(row, entry.usage);
 				if (entry.errorMessage) row.errors += 1;
+				continue;
+			}
+
+			if (isCustomMessageEntry(entry)) {
+				if (entry.customType === "async-result" && isAsyncResultDetails(entry.details)) {
+					for (const job of entry.details.jobs ?? []) reconcileAsyncResult(subagents, job, entry.content);
+				}
 				continue;
 			}
 
@@ -262,6 +272,23 @@ function addSubagentResult(t: SubagentTracker, r: SingleResultLike) {
 }
 
 /**
+ * `completed`/`failed`/`aborted` are the terminal statuses documented by the
+ * hub tool itself; `cancelled` (an explicit `hub cancel`, or a stalled job
+ * killed by the orchestrator) is just as final but easy to miss since it
+ * isn't mentioned alongside the other three anywhere — confirmed empirically
+ * against a live session where a cancelled multi-launch pm-worker job ran
+ * for real (tens of minutes, real tokens) before being killed, and without
+ * this would settle as nothing at all, forever.
+ */
+function isTerminalStatus(status: string | undefined): boolean {
+	return status === "completed" || status === "failed" || status === "aborted" || status === "cancelled";
+}
+
+function isNonSuccessStatus(status: string | undefined): boolean {
+	return status === "failed" || status === "aborted" || status === "cancelled";
+}
+
+/**
  * A `task` progress snapshot (from `details.progress[]`). A non-terminal
  * status only creates/updates the placeholder row (model key, label) — it is
  * never settled, since its counters are all-zero anyway (verified
@@ -275,7 +302,7 @@ function addSubagentProgress(t: SubagentTracker, p: AgentProgressLike) {
 	const originDetail = p.agent ? `${p.agent} (${p.status ?? "running"})` : p.status;
 	const row = upsertSubagentRow(t, p.id, role, modelKey, originDetail);
 
-	if (p.status !== "completed" && p.status !== "failed" && p.status !== "aborted") return;
+	if (!isTerminalStatus(p.status)) return;
 
 	const real = realUsageFor(t, p.id);
 	settleSubagent(t, p.id, row, {
@@ -284,7 +311,7 @@ function addSubagentProgress(t: SubagentTracker, p: AgentProgressLike) {
 		fallbackTokens: real ? undefined : p.tokens,
 		fallbackCost: real ? undefined : p.cost,
 		durationMs: p.durationMs,
-		errored: p.status === "failed" || p.status === "aborted",
+		errored: isNonSuccessStatus(p.status),
 	});
 }
 
@@ -307,13 +334,51 @@ function reconcileHubJob(t: SubagentTracker, job: HubJobLike) {
 	const modelKey = job.resolvedModelIdentity ?? job.resolvedModel ?? "unknown";
 	const row = upsertSubagentRow(t, job.id, "task", modelKey, label);
 
-	if (job.status !== "completed" && job.status !== "failed" && job.status !== "aborted") return;
+	if (!isTerminalStatus(job.status)) return;
 
 	const real = realUsageFor(t, job.id);
 	settleSubagent(t, job.id, row, {
 		calls: real?.calls,
 		usage: real,
 		durationMs: job.durationMs,
-		errored: job.status === "failed" || job.status === "aborted",
+		errored: isNonSuccessStatus(job.status),
 	});
+}
+
+/**
+ * An `async-result` custom_message — a subagent's result delivered directly
+ * because nothing consumed it via a `hub` snapshot first (see
+ * CustomMessageEntryLike). This shape carries no role, model, or status of
+ * its own: role/model come from whatever row an earlier `task`/`hub`
+ * sighting already created for this job id (falling back to "task"/"unknown"
+ * for the rare case of an id never seen before), and status is scraped
+ * best-effort from the `<task-result ... status="X">` tag in the free-text
+ * `content` (defaulting to "completed", since that's the only status this
+ * delivery path is documented to fire for).
+ */
+function reconcileAsyncResult(t: SubagentTracker, job: AsyncResultJobLike, content: unknown) {
+	const id = job.jobId ?? job.id;
+	if (!id) return;
+
+	const existing = t.rowById.get(id);
+	const role = existing?.role ?? "task";
+	const modelKey = existing?.modelKey ?? "unknown";
+	const status = statusFromTaskResultTag(content) ?? "completed";
+	const agentPrefix = existing?.originDetail?.split(" (")[0];
+	const originDetail = agentPrefix ? `${agentPrefix} (${status})` : status;
+	const row = upsertSubagentRow(t, id, role, modelKey, originDetail);
+
+	const real = realUsageFor(t, id);
+	settleSubagent(t, id, row, {
+		calls: real?.calls,
+		usage: real,
+		durationMs: job.durationMs,
+		errored: isNonSuccessStatus(status),
+	});
+}
+
+/** Best-effort scrape of `status="..."` from a `<task-result ... status="X">` tag. Never throws; undefined on anything but a matching plain string. */
+function statusFromTaskResultTag(content: unknown): string | undefined {
+	if (typeof content !== "string") return undefined;
+	return content.match(/<task-result\b[^>]*\bstatus="([a-z]+)"/)?.[1];
 }
